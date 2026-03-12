@@ -4,11 +4,12 @@
 torch>=2.0.0
 torchvision>=0.15.0
 torchaudio>=2.0.0
+pytorch_lightning==2.1.2
 
 # ==================================================
 # HuggingFace Ecosystem (Required)
 # ==================================================
-transformers>=4.35.0
+transformers[torch]>=4.35.0
 datasets>=2.14.0
 tokenizers>=0.15.0
 accelerate>=0.24.0
