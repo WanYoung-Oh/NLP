@@ -34,6 +34,9 @@ rouge>=1.0.1
 sacrebleu>=2.3.1
 evaluate>=0.4.0
 
+# 한국어 ROUGE (권장): 형태소/한국어 문자 보존 평가
+korouge-score>=0.1.4   # pip install korouge_score
+
 # ==================================================
 # Korean NLP (Required for Korean tasks)
 # ==================================================

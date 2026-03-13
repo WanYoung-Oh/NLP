@@ -35,7 +35,7 @@ NLP/
 │   └── utils/
 │       ├── metrics.py       # ROUGE 계산 (한국어 형태소 기반)
 │       └── postprocess.py   # 생성 토큰 제거 등 후처리
-├── data/                    # train.csv, dev.csv, test.csv
+├── data/                    # train.csv, dev.csv, test.csv (일부 대회는 train만 별도 제공)
 ├── outputs/                 # Hydra 실험 결과 (자동 생성)
 ├── multirun/                # Sweep 결과 (자동 생성)
 ├── checkpoints/             # 모델 체크포인트
@@ -43,6 +43,7 @@ NLP/
 ```
 
 ## 파일 위치 규칙
+
 - 새로운 모델: `src/models/` 에 추가
 - 새로운 데이터 로더: `src/data/` 에 추가
 - 유틸리티 함수: `src/utils/` 에 추가
@@ -57,12 +58,13 @@ NLP/
 **Hydra를 사용한 계층적 config 관리로 실험 효율성 극대화.**
 
 #### `conf/config.yaml` (메인 설정)
+
 ```yaml
 defaults:
-  - model: kobart              # conf/model/kobart.yaml 선택
-  - training: baseline         # conf/training/baseline.yaml 선택
-  - inference: beam4           # conf/inference/beam4.yaml 선택
-  - _self_                     # 현재 파일 우선순위 최상위
+  - model: kobart # conf/model/kobart.yaml 선택
+  - training: baseline # conf/training/baseline.yaml 선택
+  - inference: beam4 # conf/inference/beam4.yaml 선택
+  - _self_ # 현재 파일 우선순위 최상위
 
 general:
   data_path: "../data/"
@@ -81,11 +83,12 @@ tokenizer:
     - "#PhoneNumber#"
     - "#Address#"
     - "#PassportNumber#"
+  # 전체 파이프라인(예: docs/PRD.md)에서는 #DateOfBirth#, #SSN#, #CardNumber#, #CarNumber#, #Email# 등 추가 마스킹 토큰 9개 확장 가능
 
 wandb:
   entity: "your_entity"
   project: "dialogue_summarization"
-  name: "${model.name}_${training.learning_rate}"  # 동적 run name
+  name: "${model.name}_${training.learning_rate}" # 동적 run name
 
 # Hydra 실행 설정
 hydra:
@@ -97,6 +100,7 @@ hydra:
 ```
 
 #### `conf/model/kobart.yaml` (모델별 config)
+
 ```yaml
 name: kobart
 model_name: "digit82/kobart-summarization"
@@ -104,14 +108,16 @@ architecture: "bart"
 ```
 
 #### `conf/model/kot5.yaml`
+
 ```yaml
 name: kot5
 model_name: "paust/pko-t5-large"
 architecture: "t5"
-prefix: "summarize: "  # T5는 prefix 필요
+prefix: "summarize: " # T5는 prefix 필요
 ```
 
 #### `conf/training/baseline.yaml` (학습 설정)
+
 ```yaml
 num_train_epochs: 20
 learning_rate: 1e-5
@@ -122,6 +128,7 @@ weight_decay: 0.01
 lr_scheduler_type: "cosine"
 optim: "adamw_torch"
 gradient_accumulation_steps: 1
+max_grad_norm: 1.0 # gradient clipping (학습 불안정 방지, 한국어 요약에서 권장)
 evaluation_strategy: "epoch"
 save_strategy: "epoch"
 save_total_limit: 5
@@ -135,6 +142,7 @@ report_to: "wandb"
 ```
 
 #### `conf/training/full.yaml` (전체 학습)
+
 ```yaml
 defaults:
   - baseline
@@ -146,10 +154,12 @@ early_stopping_patience: 5
 ```
 
 #### `conf/inference/beam4.yaml` (추론 설정)
+
 ```yaml
 num_beams: 4
 no_repeat_ngram_size: 2
 early_stopping: true
+length_penalty: 1.0 # 대화 요약에는 1.0~2.0 권장 (긴 요약 선호 시 상향)
 generate_max_length: 100
 batch_size: 32
 remove_tokens: ["<usr>", "<s>", "</s>", "<pad>"]
@@ -158,12 +168,13 @@ result_path: "./prediction/"
 ```
 
 #### `conf/inference/beam8.yaml`
+
 ```yaml
 defaults:
   - beam4
 
-num_beams: 8  # beam search 강화
-batch_size: 16  # 메모리 고려
+num_beams: 8 # beam search 강화
+batch_size: 16 # 메모리 고려
 ```
 
 ---
@@ -171,11 +182,14 @@ batch_size: 16  # 메모리 고려
 ### 2. 데이터 전처리 (`src/data/preprocess.py`)
 
 **데이터 구조:**
+
 - `fname`: 파일명 (train_0, train_1, ...)
 - `dialogue`: 멀티턴 대화 (`#Person1#:`, `#Person2#:` 형식)
 - `summary`: 요약문 (train/dev 전용)
+- `topic`: (선택) 대화 주제 — dev 등에 있을 수 있음, 학습 시 활용 가능
 
 **Preprocess 클래스 핵심 패턴:**
+
 ```python
 class Preprocess:
     def make_input(self, dataset, is_test=False):
@@ -184,6 +198,7 @@ class Preprocess:
 ```
 
 **Dataset 클래스 3종:**
+
 - `DatasetForTrain` - (encoder_input, decoder_input, labels)
 - `DatasetForVal` - 동일 구조
 - `DatasetForInference` - (encoder_input, test_id) — labels 없음
@@ -255,6 +270,7 @@ if __name__ == "__main__":
 ```
 
 **핵심 패턴:**
+
 - `@hydra.main` 데코레이터로 config 자동 로드
 - `cfg.model.name`, `cfg.training.learning_rate` 등으로 접근
 - Hydra가 자동으로 실험 결과를 `outputs/` 디렉토리에 저장
@@ -264,11 +280,20 @@ if __name__ == "__main__":
 
 ### 5. ROUGE 평가 (`src/utils/metrics.py`)
 
-**한국어 특성 주의:** 형태소 단위 토크나이징으로 점수 산출.
+**한국어 특성 주의:** 표준 ROUGE 구현체는 비라틴 문자(한국어 등)를 제거할 수 있어 점수가 왜곡됩니다. **한국어 평가 시에는 형태소/한국어 지원 ROUGE 사용을 권장**합니다.
+
+- **권장:** `korouge-score` (한국어 문자 보존, 순수 Python) 또는 KoROUGE(형태소 분석 후 채점)
+- **일반 패키지:** `rouge` — 영어 위주; 한국어는 서브워드 단위로만 비교되거나 제한적일 수 있음
+- **Phase 3 이상:** 프로젝트에서 형태소 ROUGE로 통일할 경우 konlpy Okt 기반 평가를 권장 (전체 계획은 `docs/PRD.md` Phase 3 참고).
 
 ```python
-from rouge import Rouge
+# 예: korouge-score 사용 시 (한국어 권장)
+# pip install korouge_score
+# from korouge_score import rouge_scorer
+# scorer = rouge_scorer.RougeScorer(["rouge1", "rouge2", "rougeL", "rougeLsum"])
 
+# 예: 기본 rouge 패키지 (한국어 시 주의)
+from rouge import Rouge
 def compute_metrics(config, tokenizer, pred):
     rouge = Rouge()
     # 불필요한 생성 토큰 제거 후 평가
@@ -277,9 +302,11 @@ def compute_metrics(config, tokenizer, pred):
 ```
 
 **대회 평가 지표:**
+
 ```
 Score = mean(ROUGE-1-F1) + mean(ROUGE-2-F1) + mean(ROUGE-L-F1)
 ```
+
 test 데이터는 dialogue 1개당 summary 3개 → 3개 개별 채점 후 종합.
 
 ---
@@ -304,13 +331,13 @@ output = generate_model.generate(
 
 자세한 모델별 전략은 `references/models.md` 참고.
 
-| 전략 | 설명 |
-|------|------|
-| 모델 교체 | KoBART → PEGASUS-ko, mBART, KoT5 등 |
-| 프롬프트 엔지니어링 | 디코더 입력 형식 변경 |
-| 후처리 | 특수 토큰 정리, 문장 정규화 |
-| 앙상블 | 여러 체크포인트 출력 평균화 |
-| 데이터 증강 | back-translation, paraphrase |
+| 전략                | 설명                                |
+| ------------------- | ----------------------------------- |
+| 모델 교체           | KoBART → PEGASUS-ko, mBART, KoT5 등 |
+| 프롬프트 엔지니어링 | 디코더 입력 형식 변경               |
+| 후처리              | 특수 토큰 정리, 문장 정규화         |
+| 앙상블              | 여러 체크포인트 출력 평균화         |
+| 데이터 증강         | back-translation, paraphrase        |
 
 ---
 
@@ -349,6 +376,7 @@ mkdir -p conf/model conf/training conf/inference
 ```
 
 ### 기본 실행
+
 ```bash
 # 1. 환경 변수 로드 확인
 cat .env
@@ -431,7 +459,7 @@ hydra:
   sweeper:
     optuna_config:
       study_name: dialogue_summarization
-      direction: maximize  # ROUGE 점수 최대화
+      direction: maximize # ROUGE 점수 최대화
       n_trials: 20
       n_jobs: 1
     params:
@@ -455,7 +483,7 @@ defaults:
 
 hydra:
   launcher:
-    n_jobs: 4  # 4개 병렬 실행
+    n_jobs: 4 # 4개 병렬 실행
 ```
 
 ```bash
@@ -468,18 +496,26 @@ python src/train.py -m model=kobart,kot5,pegasus training.learning_rate=1e-5,3e-
 
 ## 참고 문서
 
+### 프로젝트 계획 (docs/)
+
+- `docs/PRD.md` — 전체 Phase별 구현 계획 (환경 셋업 → 모델 업그레이드 → 앙상블·후처리)
+- `docs/RESEARCH.md` — 데이터·평가 방식·실험 전략 상세
+
 ### 가이드
+
 - `references/setup_guide.md` — **[시작]** 프로젝트 초기 설정 가이드 (환경 설정, 패키지 설치, 문제 해결)
 - `references/models.md` — 모델 선택 가이드 및 HuggingFace 모델 목록
 - `references/training_tips.md` — 학습 최적화, 디버깅 팁, Hydra best practices, 자주 발생하는 오류
 - `references/hydra_sweep.md` — Hydra sweep 전략, Optuna 통합, 병렬 실행, 결과 분석 가이드
 
 ### 템플릿 파일
+
 - `references/.env.template` — 환경 변수 템플릿 (WandB 설정 등)
 - `references/requirements.txt` — 필수 패키지 목록 (Hydra, Transformers, WandB 등)
 - `references/.gitignore` — Git 제외 파일 목록 (.env, checkpoints, outputs 등)
 
 **사용법:**
+
 ```bash
 cp references/.env.template .env          # 환경 변수 설정
 pip install -r references/requirements.txt  # 패키지 설치
@@ -491,17 +527,20 @@ cp references/.gitignore .gitignore       # Git 설정
 ## 핵심 장점
 
 ✅ **Hydra로 실험 효율성 극대화**
+
 - Config group으로 모델/학습/추론 설정 모듈화
 - Command-line override로 빠른 실험
 - Sweep으로 자동 하이퍼파라미터 탐색
 - 실험 결과 자동 저장 및 재현 가능
 
 ✅ **Seq2SeqTrainer로 안정적 학습**
+
 - HuggingFace 생태계 완벽 호환
 - Generate 기능 내장
 - ROUGE 평가 자동화
 
 ✅ **WandB로 실험 추적**
+
 - 모든 metric 자동 로깅
 - Sweep 결과 시각화
 - 팀 협업 지원

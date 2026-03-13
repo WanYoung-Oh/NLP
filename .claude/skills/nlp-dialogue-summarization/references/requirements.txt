@@ -4,6 +4,7 @@
 torch>=2.0.0
 torchvision>=0.15.0
 torchaudio>=2.0.0
+pytorch_lightning==2.1.2
 
 # ==================================================
 # HuggingFace Ecosystem (Required)
@@ -33,11 +34,14 @@ rouge>=1.0.1
 sacrebleu>=2.3.1
 evaluate>=0.4.0
 
+# 한국어 ROUGE (권장): 형태소/한국어 문자 보존 평가
+korouge-score>=0.1.4   # pip install korouge_score
+
 # ==================================================
 # Korean NLP (Required for Korean tasks)
 # ==================================================
-# konlpy>=0.6.0  # 한국어 형태소 분석 (Mecab 설치 필요)
-# python-mecab-ko>=1.0.0  # Mecab wrapper
+konlpy>=0.6.0  # 한국어 형태소 분석 (Mecab 설치 필요)
+python-mecab-ko>=1.0.0  # Mecab wrapper
 
 # ==================================================
 # Data Processing (Required)
@@ -92,10 +96,11 @@ pyarrow>=14.0.0  # Faster dataset loading
 #    - CUDA 11.8: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 #    - CUDA 12.1: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 #
-# 2. Konlpy (한국어 형태소 분석):
+# 2. Konlpy (한국어 형태소 분석, Phase 3 형태소 ROUGE용):
 #    - Ubuntu/Debian: sudo apt-get install g++ openjdk-8-jdk python3-dev python3-pip curl
 #    - Mac: brew install mecab mecab-ko mecab-ko-dic
 #    - 설치 후: pip install konlpy
+#    - docs/PRD.md Phase 3에서 형태소 기반 ROUGE(konlpy Okt) 적용 시 사용
 #
 # 3. Hydra plugins는 필요에 따라 선택적으로 설치
 #    - Optuna sweep: pip install hydra-optuna-sweeper

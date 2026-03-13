@@ -54,6 +54,7 @@ NLP/
 │   ├── train.py                     # @hydra.main, Seq2SeqTrainer
 │   ├── inference.py                 # beam search / MBR decoding / Solar API
 │   └── utils/
+│       ├── device.py                # 디바이스 자동 감지 (NVIDIA GPU / Mac M4 MPS)
 │       ├── metrics.py               # 형태소 기반 ROUGE (konlpy Okt)
 │       └── postprocess.py           # 특수 토큰 제거, 마침표 보장, 반복 제거
 ├── data/                            # train.csv, dev.csv, test.csv
@@ -172,15 +173,26 @@ hydra:
 | `conf/inference/beam4.yaml` | 기본 추론 설정 |
 | `src/data/preprocess.py` | 베이스라인 `Preprocess`, `DatasetForTrain/Val/Inference` 이식 |
 | `src/models/summarizer.py` | `bart` 아키텍처 모델 로드 |
+| `src/utils/device.py` | **디바이스 자동 감지**: NVIDIA GPU(CUDA) 또는 Mac M4 MPS 우선 사용, 없으면 CPU (train/inference에서 공통 사용) |
 | `src/utils/metrics.py` | `compute_metrics` (rouge 라이브러리 기반, 기존 베이스라인 로직) |
 | `src/utils/postprocess.py` | 특수 토큰 제거 (베이스라인 기존 로직) |
 | `src/train.py` | `@hydra.main` + `Seq2SeqTrainer` + WandB |
 | `src/inference.py` | beam search + CSV 저장 |
 
+#### `src/utils/device.py` 설계 (디바이스 자동 감지)
+
+- **목적**: 학습·추론 시 실행 환경에 맞는 디바이스를 자동 선택하여 `train.py`, `inference.py`, `summarizer.py` 등에서 공통 사용.
+- **우선순위**: 1) NVIDIA GPU (`torch.cuda.is_available()`) → `cuda`  
+  2) Mac M4 등 Apple Silicon MPS (`torch.backends.mps.is_available()`) → `mps`  
+  3) 그 외 → `cpu`
+- **제공 API**: `get_device()` → `torch.device`, 필요 시 `device_map` 등 Trainer/추론에서 사용할 수 있는 형식으로 반환.
+- **주의**: MPS 사용 시 PyTorch 2.0+ 권장; 일부 연산은 MPS 미지원 시 CPU로 fallback 처리 고려.
+
 #### 핵심 결정 사항
 
 - `Preprocess.make_input()`: 베이스라인 로직 유지, 추후 포맷 변경은 config로 제어
 - `compute_metrics()`: 현재 `rouge` 라이브러리 사용 유지 (형태소 적용은 Phase 3에서)
+- **디바이스**: `src/utils/device.py`의 `get_device()`를 사용해 NVIDIA GPU / Mac M4 MPS 자동 감지, 학습·추론에 일관 적용
 - WandB run name: `${model.name}_lr${training.learning_rate}_ep${training.num_train_epochs}` 자동 생성
 
 ---
@@ -335,7 +347,7 @@ ensemble.py
 - [ ] `.env` 파일 API key 설정 완료 (`WANDB_API_KEY`, `HF_TOKEN`, `UPSTAGE_API_KEY`)
 - [ ] `requirements.txt` 기준 패키지 설치 확인
 - [ ] `data/` 디렉토리에 `train.csv`, `dev.csv`, `test.csv` 배치
-- [ ] `python -c "import torch; print(torch.cuda.is_available())"` GPU 확인
+- [ ] GPU/MPS 확인: `python -c "import torch; print('cuda:', torch.cuda.is_available(), 'mps:', getattr(torch.backends.mps, 'is_available', lambda: False)())"` (NVIDIA 또는 Mac M4 등)
 
 **스킬 구조 구축**
 - [ ] `conf/` 디렉토리 구조 생성 (model/, training/, inference/)
@@ -349,10 +361,11 @@ ensemble.py
 - [ ] `conf/inference/beam4.yaml` 작성
 - [ ] `src/data/preprocess.py` — `Preprocess`, `DatasetForTrain/Val/Inference` 구현
 - [ ] `src/models/summarizer.py` — `bart` 아키텍처 로드
+- [ ] `src/utils/device.py` — NVIDIA GPU / Mac M4 MPS 자동 감지, `get_device()` 구현
 - [ ] `src/utils/metrics.py` — `compute_metrics` 구현
 - [ ] `src/utils/postprocess.py` — 특수 토큰 제거 구현
-- [ ] `src/train.py` — `@hydra.main` + `Seq2SeqTrainer` + WandB
-- [ ] `src/inference.py` — beam search + CSV 출력
+- [ ] `src/train.py` — `@hydra.main` + `Seq2SeqTrainer` + WandB (device는 `device.py` 사용)
+- [ ] `src/inference.py` — beam search + CSV 출력 (device는 `device.py` 사용)
 
 **베이스라인 검증**
 - [ ] `python src/train.py` 실행 → 오류 없이 학습 시작 확인
@@ -460,6 +473,7 @@ ensemble.py
 
 | 테스트 항목 | 확인 방법 | 기대 결과 |
 |-------------|-----------|-----------|
+| `get_device()` | `from src.utils.device import get_device; get_device()` | 환경에 따라 `cuda` / `mps` / `cpu` 중 하나, `torch.device` 반환 |
 | `Preprocess.make_input()` train 모드 | 반환값 3개 (encoder, decoder_in, decoder_out) | 길이 동일, BOS/EOS 붙어있음 |
 | `Preprocess.make_input()` test 모드 | 반환값 2개 (encoder, decoder_in) | decoder_in이 모두 `<s>` |
 | `clean_text()` | 단독 자음 포함 입력 → 출력 확인 | 자음 제거됨 |

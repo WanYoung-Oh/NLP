@@ -10,11 +10,13 @@
 
 | 모델 | HuggingFace ID | 특징 |
 |------|---------------|------|
-| **KoBART** (베이스라인) | `digit82/kobart-summarization` | 한국어 요약 전용 fine-tune, 안정적 |
+| **KoBART** (베이스라인) | `digit82/kobart-summarization` | 한국어 요약 전용 fine-tune, 다운로드 다수 |
+| KoBART (대안) | `gogamza/kobart-summarization` | 한국어 요약, safetensors·배포 친화적 |
 | KoBART base | `gogamza/kobart-base-v2` | 사전학습만 된 KoBART, 직접 fine-tune |
-| PEGASUS-ko | `snunlp/KR-ELECTRA-discriminator` | 요약 특화 사전학습 |
 | mBART | `facebook/mbart-large-cc25` | 다국어, 한국어 포함 |
 | KoT5 | `paust/pko-t5-large` | T5 기반 한국어 모델 |
+
+**참고:** PEGASUS는 한국어 공식 모델이 HuggingFace에 거의 없음. `snunlp/KR-ELECTRA-discriminator`는 ELECTRA 분류 모델이므로 요약용이 아님.
 
 ### Decoder-Only (CLM 기반 요약)
 
@@ -27,13 +29,16 @@
 
 ## 모델 교체 방법
 
-`config.yaml`의 `general.model_name`만 수정:
+`conf/model/` 아래 해당 모델 yaml에서 `model_name` 수정, 또는 config group으로 선택:
 
 ```yaml
-general:
-  model_name: "gogamza/kobart-base-v2"  # 여기만 변경
+# conf/model/kobart.yaml 등
+name: kobart
+model_name: "gogamza/kobart-base-v2"  # 여기서 변경
+architecture: "bart"
 ```
 
+실행 시: `python src/train.py model=kot5` 처럼 config group으로 모델 전환.  
 모델에 따라 `tokenizer.special_tokens` 호환 여부 확인 필요.
 
 ---
