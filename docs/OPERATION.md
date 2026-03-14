@@ -16,7 +16,9 @@
 8. [WandB 모니터링](#8-wandb-모니터링)
 9. [설정 파일 레퍼런스](#9-설정-파일-레퍼런스)
 10. [모델별 운영 가이드](#10-모델별-운영-가이드)
-11. [트러블슈팅](#11-트러블슈팅)
+11. [실험 자동화 스크립트](#11-실험-자동화-스크립트)
+12. [단위 테스트](#12-단위-테스트)
+13. [트러블슈팅](#13-트러블슈팅)
 
 ---
 
@@ -55,26 +57,47 @@ data/
 ```
 NLP/
 ├── conf/                    # Hydra 설정 파일
-│   ├── config.yaml          # 최상위 설정 (defaults + general + tokenizer + metrics)
+│   ├── config.yaml          # 최상위 설정 (defaults + general + tokenizer + data + metrics)
 │   ├── model/               # 모델별 config
 │   ├── training/            # 학습 설정
 │   └── inference/           # 추론 설정
+│       ├── beam4.yaml
+│       ├── beam8.yaml
+│       ├── mbr.yaml
+│       ├── tta.yaml
+│       ├── solar_api.yaml
+│       └── zero_shot_solar.yaml   # Solar zero-shot 추론 (신규)
 ├── src/
 │   ├── train.py             # 학습 진입점
 │   ├── inference.py         # 추론 진입점
-│   ├── ensemble.py          # 앙상블 / GroupKFold OOF
+│   ├── ensemble.py          # 앙상블 / GroupKFold OOF / MBRDecoder
 │   ├── data/
-│   │   ├── preprocess.py    # Preprocess, DatasetForSeq2Seq, DatasetForInference
-│   │   └── augment.py       # 데이터 증강 (back-translation, EDA)
+│   │   ├── preprocess.py    # Preprocess, clean_text, filter_by_length,
+│   │   │                    #   DatasetForSeq2Seq, DatasetForInference,
+│   │   │                    #   reverse_utterances, apply_tta
+│   │   ├── augment.py       # EDA / back-translation 증강 핵심 로직
+│   │   └── run_augment.py   # 증강 CLI 진입점
 │   ├── models/
 │   │   └── summarizer.py    # 모델 로드 (BART / T5 / CausalLM 분기)
 │   └── utils/
 │       ├── device.py        # 디바이스 자동 감지 (CUDA > MPS > CPU)
-│       ├── metrics.py       # ROUGE 평가 (단일/다중 정답)
-│       └── postprocess.py   # 후처리 파이프라인
+│       ├── metrics.py       # ROUGE 평가 (단일/다중 정답, korouge-score 지원)
+│       └── postprocess.py   # 후처리 파이프라인 (5단계)
+├── scripts/
+│   ├── evaluate_on_dev.py   # dev ROUGE 평가 (후처리 전/후, beam4/8/MBR/TTA 비교)
+│   └── run_all_experiments.sh  # Phase 1~5 전체 실험 자동화
+├── tests/
+│   ├── __init__.py
+│   └── test_pipeline.py     # 43개 단위 테스트 (GPU 불필요)
 ├── data/                    # 원본 CSV
+├── data_aug/                # EDA/역번역 증강 결과 (run_augment.py 실행 후 생성)
+│   ├── train.csv            #   원본 + 증강 합산
+│   ├── train_aug_eda.csv    #   EDA 증강 결과만 (참고용)
+│   ├── dev.csv              #   원본에서 복사
+│   └── test.csv             #   원본에서 복사
 ├── checkpoints/             # 학습 체크포인트 (yymmdd_run_NNN/epoch##_score)
 ├── prediction/              # 추론 결과 CSV
+├── logs/                    # run_all_experiments.sh 실행 로그
 ├── outputs/                 # Hydra 실행 로그
 └── docs/                    # 프로젝트 문서
 ```
@@ -139,9 +162,9 @@ python src/train.py general.data_path=data_aug
 python src/train.py
 
 # 모델 변경
-python src/train.py model=kot5
+python src/train.py model=kot5 training=t5
 python src/train.py model=kobart_v2
-python src/train.py model=pko_t5
+python src/train.py model=pko_t5 training=t5
 python src/train.py model=solar_qlora training=qlora
 
 # 학습 설정 변경
@@ -158,14 +181,38 @@ python src/train.py training.per_device_train_batch_size=8
 python src/train.py training.learning_rate=5e-5 training.num_train_epochs=30
 ```
 
-### 3-3. Hydra Sweep (여러 설정 순차 실행)
+### 3-3. 데이터 전처리 플래그 (Phase 3+)
+
+`conf/config.yaml`의 `data` 섹션으로 전처리 옵션을 제어합니다.
+
+```yaml
+data:
+  use_cleaning: false        # true: clean_text() 적용 — 단독 자음·빈 괄호·반복 특수기호 제거
+  use_length_filter: false   # true: filter_by_length() 적용 — 이상치 길이 샘플 제거
+```
+
+CLI로 override:
+
+```bash
+# 클리닝만 활성화
+python src/train.py data.use_cleaning=true
+
+# 클리닝 + 길이 필터 둘 다 활성화
+python src/train.py model=kot5 training=full data.use_cleaning=true data.use_length_filter=true
+```
+
+- `use_cleaning`: `dialogue`와 `summary` 컬럼 모두에 `clean_text()` 적용 (학습 데이터 한정)
+- `use_length_filter`: `filter_by_length()` 적용 — dialogue > 1500자 또는 summary < 5자 / > 250자 샘플 제거 (학습 데이터 한정)
+- 검증 데이터에는 클리닝만 적용, 길이 필터는 적용하지 않음 (일관성 유지)
+
+### 3-4. Hydra Sweep (여러 설정 순차 실행)
 
 ```bash
 python src/train.py -m model=kobart,kot5 training=baseline
 python src/train.py -m training.learning_rate=1e-5,3e-5,5e-5
 ```
 
-### 3-4. 최종 제출용 Train+Dev 합산 학습 (선택)
+### 3-5. 최종 제출용 Train+Dev 합산 학습 (선택)
 
 모든 실험·모델 선택이 끝난 뒤, 시간이 남을 때 시도하는 선택적 전략입니다.
 
@@ -187,7 +234,7 @@ python src/train.py training.use_all_data=true training.num_train_epochs=6
 - **eval 자동 비활성화** — dev가 학습 데이터에 포함되므로 eval을 돌리면 지표가 오염됨. `do_eval=False`·`eval_strategy="no"`·Early stopping·BestCheckpointCallback이 모두 자동으로 꺼짐
 - `num_train_epochs`는 **직전 dev 검증에서 확인한 best epoch 수**로 직접 지정할 것
 
-### 3-5. 평가 메트릭
+### 3-6. 평가 메트릭
 
 | WandB 키 | 설명 |
 |----------|------|
@@ -198,7 +245,7 @@ python src/train.py training.use_all_data=true training.num_train_epochs=6
 
 > 로컬 dev.csv는 정답 1개 기준. 대회 채점은 정답 3개 기준이라 로컬 점수보다 높게 나올 수 있습니다.
 
-### 3-6. 한국어 ROUGE 활성화
+### 3-7. 한국어 ROUGE 활성화
 
 `conf/config.yaml`에서 설정합니다.
 
@@ -213,7 +260,7 @@ metrics:
 python src/train.py metrics.use_korouge=true
 ```
 
-### 3-7. 학습 출력물
+### 3-8. 학습 출력물
 
 - **체크포인트**: `checkpoints/{yymmdd_run_NNN}/epoch{##}_{rouge_combined:.4f}/`
   - rouge_combined 상위 3개만 유지 (`BestCheckpointCallback`)
@@ -276,7 +323,11 @@ python src/inference.py inference.max_length_ratio=0.2 inference.ckt_path=checkp
 ### 4-5. Solar API 추론
 
 ```bash
+# Few-shot (기본)
 python src/inference.py inference=solar_api
+
+# Zero-shot
+python src/inference.py inference=zero_shot_solar
 ```
 
 `conf/inference/solar_api.yaml` 기본 설정:
@@ -291,6 +342,22 @@ prompt_style: few_shot        # zero_shot | few_shot
 n_few_shot: 3
 use_bm25: true                # BM25 기반 동적 few-shot 예제 선택
 rate_limit_rpm: 100
+```
+
+`conf/inference/zero_shot_solar.yaml` (신규):
+
+```yaml
+# beam4 기본값 상속 후 Solar zero-shot 항목 오버라이드
+inference_type: "solar_api"
+model_name: "solar-pro"
+temperature: 0.1
+top_p: 0.9
+max_tokens: 150
+prompt_style: "zero_shot"
+n_few_shot: 0
+use_bm25: false
+rate_limit_rpm: 100
+output_filename: "output_solar_zero_shot.csv"
 ```
 
 > `UPSTAGE_API_KEY`가 `.env`에 설정되어 있어야 합니다.
@@ -321,7 +388,32 @@ python src/inference.py inference.ckt_path=... inference.output_filename=output_
 
 학습 중 `compute_metrics()`가 epoch마다 자동 호출됩니다. 결과는 WandB에 기록됩니다.
 
-### 5-2. 대회 공식 채점 방식 (다중 정답 ROUGE)
+### 5-2. Dev 종합 평가 스크립트 (`scripts/evaluate_on_dev.py`)
+
+PRD Phase 5 기준의 포괄적 평가를 한 번에 수행합니다.
+
+```bash
+# 기본 (best checkpoint 자동 탐색, beam4 후처리 전/후 비교)
+python scripts/evaluate_on_dev.py
+
+# 체크포인트 직접 지정
+python scripts/evaluate_on_dev.py --ckt_path checkpoints/260313_run_001/epoch06_0.7498
+
+# beam4/beam8/MBR/TTA 전체 비교 (--run_all)
+python scripts/evaluate_on_dev.py --ckt_path <path> --run_all --n_tta_ways 2
+
+# 결과 저장 경로 지정
+python scripts/evaluate_on_dev.py --run_all --output_csv prediction/dev_eval_results.csv
+```
+
+출력 항목:
+- **A. beam4 기본**: 후처리 전/후 ROUGE 비교 및 개선 delta
+- **B. beam8** (`--run_all`): 후처리 후 ROUGE
+- **C. MBR** (`--run_all`): n_samples=10 샘플링 후 MBR 선택
+- **D. TTA** (`--run_all`): n_tta_ways-way 변형본 앙상블
+- 최종 비교 테이블 → `prediction/dev_eval_results.csv` 저장
+
+### 5-3. 대회 공식 채점 방식 (다중 정답 ROUGE)
 
 대회는 정답 3개에 대해 각각 ROUGE를 계산한 뒤 평균을 합산합니다.
 로컬에서 재현하려면 `evaluate_multi_ref()`를 사용합니다:
@@ -352,7 +444,7 @@ score = compute_multi_ref_rouge(
 )
 ```
 
-### 5-3. rouge vs korouge-score 비교
+### 5-4. rouge vs korouge-score 비교
 
 ```python
 from src.utils.metrics import compare_rouge_modes
@@ -473,6 +565,7 @@ WANDB_PROJECT=nlp-dialogue-summary
 ```
 
 run name은 `{model.name}_lr{learning_rate}_ep{num_train_epochs}` 형식으로 자동 생성됩니다.
+`model.name` 필드는 각 `conf/model/*.yaml`에 정의되어 있습니다.
 
 ### 8-2. 오프라인 모드
 
@@ -510,11 +603,21 @@ tokenizer:
   decoder_max_len: 100
   bos_token: "<s>"
   eos_token: "</s>"
-  special_tokens: [...]             # #Person1#~#Email# 총 11개
+  special_tokens:                   # 총 15개
+    - "#Person1#"  ~ "#Person7#"    # 화자 태그 7개
+    - "#PhoneNumber#", "#Address#", "#PassportNumber#"
+    - "#DateOfBirth#", "#SSN#", "#CardNumber#", "#CarNumber#", "#Email#"
+
+data:
+  use_cleaning: false        # true: clean_text() 적용 (Phase 3+)
+  use_length_filter: false   # true: filter_by_length() 적용
 
 metrics:
   use_korouge: false                # true: korouge-score (Phase 3+), false: rouge 라이브러리
 ```
+
+> **주의**: 기존 11개에서 `#Person4#`~`#Person7#` 4개가 추가되어 총 15개입니다.
+> 기존 체크포인트를 재사용할 경우 토크나이저 임베딩 크기가 다를 수 있습니다.
 
 ### 9-2. `conf/model/*.yaml`
 
@@ -552,7 +655,8 @@ metric_for_best_model: rouge_combined
 | `beam8.yaml` | Beam Search | `num_beams=8`, `length_penalty=1.2` |
 | `mbr.yaml` | MBR Decoding | `do_sample=true`, `n_samples=10` |
 | `tta.yaml` | TTA + MBR | `n_tta_ways=2`, beam4 상속 |
-| `solar_api.yaml` | Solar Chat API | `inference_type: solar_api`, `use_bm25: true` |
+| `solar_api.yaml` | Solar Chat API (Few-shot) | `inference_type: solar_api`, `use_bm25: true` |
+| `zero_shot_solar.yaml` | Solar Chat API (Zero-shot) | `prompt_style: zero_shot`, `n_few_shot: 0` |
 
 ---
 
@@ -599,9 +703,93 @@ python src/train.py model=solar_qlora training=qlora
 
 ---
 
-## 11. 트러블슈팅
+## 11. 실험 자동화 스크립트
 
-### 11-1. `torch.load` 보안 오류
+### 11-1. `scripts/run_all_experiments.sh`
+
+PRD Phase 1~5 전체 실험을 자동으로 순차 실행합니다.
+
+```bash
+# 전체 실행 (Phase 1 → 2 → 3 → 5, Phase 4는 API key 필요로 기본 제외)
+bash scripts/run_all_experiments.sh
+
+# 특정 Phase만 실행
+bash scripts/run_all_experiments.sh phase1
+bash scripts/run_all_experiments.sh phase2
+bash scripts/run_all_experiments.sh phase3
+bash scripts/run_all_experiments.sh phase4   # UPSTAGE_API_KEY 필요
+bash scripts/run_all_experiments.sh phase5
+```
+
+각 Phase 내용:
+
+| Phase | 내용 | 로그 |
+|-------|------|------|
+| phase1 | KoBART 베이스라인 학습 + beam4 추론 | `logs/phase1_*.log` |
+| phase2 | KoT5, kobart-v2, pko-T5-large 학습 + Hydra sweep | `logs/phase2_*.log` |
+| phase3 | EDA 증강, 클리닝+필터 학습, 증강 데이터 학습, Train+Dev 합산 학습 | `logs/phase3_*.log` |
+| phase4 | Solar API zero-shot + few-shot 추론 | `logs/phase4_*.log` |
+| phase5 | beam4/8/MBR/TTA 비교, test 추론 3종, 앙상블 | `logs/phase5_*.log` |
+
+- 전체 로그: `logs/run_all.log`
+- best checkpoint 자동 탐색: `scripts/evaluate_on_dev.find_best_checkpoint()`
+
+---
+
+## 12. 단위 테스트
+
+`tests/test_pipeline.py`에 43개 단위 테스트가 포함되어 있습니다. GPU 없이 실행 가능합니다.
+
+```bash
+cd /data/ephemeral/home/NLP
+python -m pytest tests/test_pipeline.py -v
+```
+
+커버 항목:
+
+| 클래스 | 테스트 대상 |
+|--------|------------|
+| `TestGetDevice` | CUDA/MPS/CPU 자동 감지 |
+| `TestPreprocess` | `make_input()` — train/test 모드, BOS/EOS, prefix |
+| `TestCleanText` | 단독 자음, 빈 괄호, 반복 특수기호, 특수 토큰 보존 |
+| `TestFilterByLength` | 긴 dialogue/짧은 summary 제거, 인덱스 리셋 |
+| `TestPostprocess` | 특수 토큰 제거, 마침표 보장, 중복 문장 제거, 최소 길이 플래그 |
+| `TestComputeMetrics` | 완벽 점수, 0점, combined 합산, multi-ref ROUGE |
+| `TestDatasets` | `DatasetForSeq2Seq` 길이 및 키 구조 |
+| `TestCompareRougeModes` | baseline/korouge 두 모드 반환, float 타입 |
+| `TestTTA` | `reverse_utterances()`, `apply_tta()` 2-way/1-way |
+| `TestMBRDecoder` | 정상/빈/단일 후보 처리 |
+| `TestEvaluateMultiRef` | 단일 정답 일치, 점수 범위 (0~3.0) |
+
+---
+
+## 13. 트러블슈팅
+
+### 13-1. `decoder_start_token_id` 오류 (eval 단계)
+
+```
+ValueError: decoder_start_token_id or bos_token_id has to be defined for encoder-decoder generation.
+```
+
+**원인**: transformers ≥ 4.38에서 `Seq2SeqTrainingArguments(generation_config=...)` 에 커스텀 `GenerationConfig`를 전달하면 모델의 기본 generation config를 완전히 대체합니다. 커스텀 config에 `decoder_start_token_id`가 누락되면 eval 시 오류가 발생합니다.
+
+**해결**: `src/train.py`의 `_build_generation_config()` 함수가 아래 폴백 체인으로 `decoder_start_token_id`를 자동 해석합니다.
+
+```
+model.config.decoder_start_token_id
+  → tokenizer.bos_token_id
+  → tokenizer.pad_token_id
+```
+
+모델별 해석 결과:
+- KoBART: `model.config.decoder_start_token_id = 2`
+- KoT5: `tokenizer.bos_token_id = 0` (fallback)
+
+이 함수는 모델/토크나이저 로드 **이후** 호출되어야 합니다 (`gen_config = _build_generation_config(cfg, tokenizer=tokenizer, model=model)`).
+
+---
+
+### 13-2. `torch.load` 보안 오류
 
 ```
 ValueError: ... requires PyTorch >= 2.6 ...
@@ -611,7 +799,7 @@ ValueError: ... requires PyTorch >= 2.6 ...
 
 ---
 
-### 11-2. GPU OOM (Out of Memory)
+### 13-3. GPU OOM (Out of Memory)
 
 ```bash
 python src/train.py \
@@ -621,7 +809,7 @@ python src/train.py \
 
 ---
 
-### 11-3. MPS 환경에서 fp16 경고
+### 13-4. MPS 환경에서 fp16 경고
 
 ```
 [Train] fp16=True 설정이 무시됩니다 (device=mps). fp32로 학습합니다.
@@ -631,7 +819,7 @@ python src/train.py \
 
 ---
 
-### 11-4. WandB 연결 오류
+### 13-5. WandB 연결 오류
 
 ```bash
 WANDB_MODE=offline python src/train.py
@@ -640,7 +828,7 @@ wandb sync wandb/offline-run-*/
 
 ---
 
-### 11-5. korouge-score 설치
+### 13-6. korouge-score 설치
 
 ```bash
 pip install korouge-score
@@ -654,10 +842,21 @@ python src/train.py metrics.use_korouge=true
 
 ---
 
-### 11-6. Solar API 추론 분기 오류
+### 13-7. Solar API 추론 분기 오류
 
 `inference=solar_api` 설정에 `inference_type: solar_api` 키가 있어야 합니다.
-`conf/inference/solar_api.yaml`에 이미 포함되어 있습니다.
+`conf/inference/solar_api.yaml` 및 `zero_shot_solar.yaml`에 이미 포함되어 있습니다.
+
+---
+
+### 13-8. `evaluate_on_dev.py` 상대 경로 오류
+
+```
+HFValidationError: Repo id must be in the form 'repo_name' ...
+```
+
+`load_model_tokenizer()`가 상대 경로를 절대 경로로 자동 변환합니다 (`os.path.join(_ROOT, ckt_path)`).
+`--ckt_path` 인수에 `checkpoints/260313_run_001/epoch06_0.7498` 형태(프로젝트 루트 기준 상대 경로)로 전달해도 정상 동작합니다.
 
 ---
 
@@ -674,6 +873,8 @@ python src/train.py                                              # KoBART 기본
 python src/train.py model=kot5                                   # KoT5
 python src/train.py model=pko_t5 training=full                   # pko-T5 풀 학습
 python src/train.py training.learning_rate=3e-5                  # LR override
+python src/train.py data.use_cleaning=true                       # 클리닝 활성화
+python src/train.py data.use_cleaning=true data.use_length_filter=true  # 클리닝+필터
 python src/train.py training.use_all_data=true                   # Train+Dev 합산 (최종 제출)
 python src/train.py -m model=kobart,kot5                         # 순차 sweep
 python src/train.py metrics.use_korouge=true                     # 한국어 ROUGE
@@ -683,7 +884,19 @@ python src/inference.py inference.ckt_path=checkpoints/PATH      # Beam4
 python src/inference.py inference=beam8 inference.ckt_path=...   # Beam8
 python src/inference.py inference=mbr   inference.ckt_path=...   # MBR
 python src/inference.py inference=tta   inference.ckt_path=...   # TTA (2-way)
-python src/inference.py inference=solar_api                      # Solar API
+python src/inference.py inference=solar_api                      # Solar API (few-shot)
+python src/inference.py inference=zero_shot_solar                # Solar API (zero-shot)
+
+# ── Dev 평가 ──────────────────────────────────────────────────
+python scripts/evaluate_on_dev.py                                # beam4 기본 평가
+python scripts/evaluate_on_dev.py --run_all                      # 전체 비교
+
+# ── 전체 실험 자동화 ───────────────────────────────────────────
+bash scripts/run_all_experiments.sh                              # Phase 1~5 전체
+bash scripts/run_all_experiments.sh phase3                       # Phase 3만
+
+# ── 단위 테스트 ──────────────────────────────────────────────
+python -m pytest tests/test_pipeline.py -v                       # 43개 테스트
 
 # ── 체크포인트 확인 ────────────────────────────────────────────
 ls -lt checkpoints/

@@ -33,12 +33,59 @@ import pandas as pd
 import torch
 import wandb
 from omegaconf import DictConfig, OmegaConf
-from transformers import EarlyStoppingCallback, Seq2SeqTrainer, Seq2SeqTrainingArguments, TrainerCallback, TrainerControl, TrainerState, TrainingArguments
+from transformers import (
+    EarlyStoppingCallback,
+    GenerationConfig,
+    Seq2SeqTrainer,
+    Seq2SeqTrainingArguments,
+    TrainerCallback,
+    TrainerControl,
+    TrainerState,
+    TrainingArguments,
+)
 
-from src.data.preprocess import DatasetForSeq2Seq, Preprocess
+from src.data.preprocess import DatasetForSeq2Seq, Preprocess, clean_text, filter_by_length
 from src.models.summarizer import load_tokenizer_and_model
 from src.utils.device import get_device
 from src.utils.metrics import compute_metrics
+
+
+def _build_generation_config(cfg: DictConfig, tokenizer=None, model=None) -> GenerationConfig | None:
+    """평가 시 predict_with_generate에 쓸 GenerationConfig.
+
+    custom GenerationConfig를 Trainer에 넘기면 모델 기본값을 완전히 override하므로,
+    decoder_start_token_id / bos_token_id / eos_token_id를 명시해야 평가 시 오류가 발생하지 않는다.
+    (transformers ≥ 4.38 에서 누락 시 ValueError 발생)
+    """
+    if not getattr(cfg.training, "predict_with_generate", False):
+        return None
+    max_length = getattr(cfg.training, "generation_max_length", 100)
+    num_beams = getattr(cfg.training, "generation_num_beams", 4)
+    repetition_penalty = getattr(cfg.training, "generation_repetition_penalty", 2.0)
+    no_repeat_ngram_size = getattr(cfg.training, "generation_no_repeat_ngram_size", 3)
+
+    # decoder_start_token_id: 모델 config → tokenizer bos → pad 순으로 fallback
+    decoder_start_token_id: int | None = None
+    if model is not None:
+        decoder_start_token_id = getattr(model.config, "decoder_start_token_id", None)
+    if decoder_start_token_id is None and tokenizer is not None:
+        decoder_start_token_id = getattr(tokenizer, "bos_token_id", None)
+    if decoder_start_token_id is None and tokenizer is not None:
+        decoder_start_token_id = getattr(tokenizer, "pad_token_id", None)
+
+    bos_token_id: int | None = getattr(tokenizer, "bos_token_id", None) if tokenizer else None
+    eos_token_id: int | None = getattr(tokenizer, "eos_token_id", None) if tokenizer else None
+
+    return GenerationConfig(
+        max_length=max_length,
+        num_beams=num_beams,
+        repetition_penalty=repetition_penalty,
+        no_repeat_ngram_size=no_repeat_ngram_size,
+        early_stopping=True,
+        decoder_start_token_id=decoder_start_token_id,
+        bos_token_id=bos_token_id,
+        eos_token_id=eos_token_id,
+    )
 
 
 def _next_run_id(checkpoints_root: str) -> str:
@@ -111,7 +158,25 @@ def _prepare_datasets(
     prefix = getattr(cfg.model, "prefix", "")
     use_all_data: bool = getattr(cfg.training, "use_all_data", False)
 
+    # Phase 3 데이터 전처리 config 플래그
+    data_cfg = getattr(cfg, "data", None)
+    use_cleaning: bool = getattr(data_cfg, "use_cleaning", False) if data_cfg else False
+    use_length_filter: bool = getattr(data_cfg, "use_length_filter", False) if data_cfg else False
+
+    def _apply_preprocessing(df: pd.DataFrame) -> pd.DataFrame:
+        """config 플래그에 따라 클리닝·길이 필터를 순서대로 적용합니다."""
+        if use_cleaning:
+            df = df.copy()
+            df["dialogue"] = df["dialogue"].apply(clean_text)
+            if "summary" in df.columns:
+                df["summary"] = df["summary"].apply(clean_text)
+            print(f"[Preprocess] clean_text 적용 완료")
+        if use_length_filter:
+            df = filter_by_length(df)
+        return df
+
     train_df = preprocessor.make_set_as_df(os.path.join(data_path, "train.csv"))
+    train_df = _apply_preprocessing(train_df)
 
     enc_max = cfg.tokenizer.encoder_max_len
     dec_max = cfg.tokenizer.decoder_max_len
@@ -124,6 +189,7 @@ def _prepare_datasets(
 
     if use_all_data:
         val_df = preprocessor.make_set_as_df(os.path.join(data_path, "dev.csv"))
+        val_df = _apply_preprocessing(val_df)
         train_df = pd.concat([train_df, val_df], ignore_index=True)
         print(
             "\n" + "=" * 60 + "\n"
@@ -142,6 +208,12 @@ def _prepare_datasets(
         return train_dataset, None
 
     val_df = preprocessor.make_set_as_df(os.path.join(data_path, "dev.csv"))
+    # val은 길이 필터 제외 (dev 점수 비교 일관성 유지), 클리닝만 적용
+    if use_cleaning:
+        val_df = val_df.copy()
+        val_df["dialogue"] = val_df["dialogue"].apply(clean_text)
+        if "summary" in val_df.columns:
+            val_df["summary"] = val_df["summary"].apply(clean_text)
     enc_train, dec_in_train, dec_out_train = preprocessor.make_input(train_df, prefix=prefix)
     enc_val, dec_in_val, dec_out_val = preprocessor.make_input(val_df, prefix=prefix)
 
@@ -213,6 +285,7 @@ def main(cfg: DictConfig) -> None:
         print(f"[Train] fp16=True 설정이 무시됩니다 (device={device.type}). fp32로 학습합니다.")
 
     use_all_data: bool = getattr(cfg.training, "use_all_data", False)
+    gen_config = _build_generation_config(cfg, tokenizer=tokenizer, model=model)
 
     if use_all_data:
         # dev가 학습 데이터에 포함되므로 eval을 완전히 끕니다.
@@ -237,6 +310,7 @@ def main(cfg: DictConfig) -> None:
             load_best_model_at_end=False,
             predict_with_generate=cfg.training.predict_with_generate,
             generation_max_length=cfg.training.generation_max_length,
+            generation_config=gen_config,
             do_train=True,
             do_eval=False,
             seed=cfg.training.seed,
@@ -274,6 +348,7 @@ def main(cfg: DictConfig) -> None:
             load_best_model_at_end=cfg.training.load_best_model_at_end,
             predict_with_generate=cfg.training.predict_with_generate,
             generation_max_length=cfg.training.generation_max_length,
+            generation_config=gen_config,
             do_train=cfg.training.do_train,
             do_eval=cfg.training.do_eval,
             seed=cfg.training.seed,

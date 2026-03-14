@@ -15,6 +15,10 @@ fp16: true
 load_best_model_at_end: true
 predict_with_generate: true
 generation_max_length: 100
+# 평가 시 생성 품질 개선 (특수 토큰 대신 <unk> 반복 붕괴 완화)
+generation_num_beams: 4
+generation_repetition_penalty: 2.0
+generation_no_repeat_ngram_size: 3
 do_train: true
 do_eval: true
 logging_strategy: "epoch"

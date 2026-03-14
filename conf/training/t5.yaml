@@ -1,0 +1,8 @@
+# T5/KoT5/PKO T5 등 seq2seq 대형 모델용 (24GB GPU OOM 방지)
+# 유효 배치 = 8 × 4 = 32 (baseline과 동일한 유효 배치 유지)
+defaults:
+  - baseline
+
+per_device_train_batch_size: 8
+per_device_eval_batch_size: 16
+gradient_accumulation_steps: 4

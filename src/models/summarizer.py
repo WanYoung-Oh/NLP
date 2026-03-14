@@ -89,6 +89,27 @@ def _patch_unigram_vocab_dict():
     TokenizersBackend.convert_to_native_format = _convert_with_unigram_dict_fix
 
 
+def _init_new_embeddings_from_unk(
+    model: torch.nn.Module,
+    old_size: int,
+    new_size: int,
+    unk_token_id: int | None,
+) -> None:
+    """추가된 토큰(old_size ~ new_size-1) 임베딩을 unk 임베딩 또는 기존 임베딩 평균으로 초기화."""
+    if new_size <= old_size:
+        return
+    emb = model.get_input_embeddings()
+    if emb is None:
+        return
+    weight = emb.weight
+    with torch.no_grad():
+        if unk_token_id is not None and 0 <= unk_token_id < old_size:
+            source = weight[unk_token_id : unk_token_id + 1].expand(new_size - old_size, -1)
+        else:
+            source = weight[:old_size].mean(dim=0, keepdim=True).expand(new_size - old_size, -1)
+        weight[old_size:new_size].copy_(source)
+
+
 def load_tokenizer_and_model(
     cfg: DictConfig,
     device: torch.device,
@@ -113,7 +134,10 @@ def load_tokenizer_and_model(
     if architecture in ("bart", "t5"):
         revision = getattr(cfg.model, "revision", "main")
         model = AutoModelForSeq2SeqLM.from_pretrained(model_name, revision=revision)
+        old_vocab_size = model.config.vocab_size
         model.resize_token_embeddings(len(tokenizer))
+        # 추가된 특수 토큰 임베딩을 unk 임베딩으로 초기화 → 초기 학습에서 <unk> 반복 붕괴 완화
+        _init_new_embeddings_from_unk(model, old_vocab_size, len(tokenizer), tokenizer.unk_token_id)
         # GPU 메모리 절약 (T5/KoT5 등 대형 seq2seq에서 OOM 방지)
         model.gradient_checkpointing_enable()
         model.to(device)

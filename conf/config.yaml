@@ -15,10 +15,16 @@ tokenizer:
   bos_token: "<s>"
   eos_token: "</s>"
   special_tokens:
-    # 베이스라인 토큰
+    # 베이스라인 화자 토큰
     - "#Person1#"
     - "#Person2#"
     - "#Person3#"
+    # 추가 화자 토큰 (대회 데이터 최대 7명 대응 — 실제 데이터 존재 여부 확인 후 사용)
+    - "#Person4#"
+    - "#Person5#"
+    - "#Person6#"
+    - "#Person7#"
+    # 개인정보 마스킹 토큰 (베이스라인 포함분)
     - "#PhoneNumber#"
     - "#Address#"
     - "#PassportNumber#"
@@ -28,6 +34,10 @@ tokenizer:
     - "#CardNumber#"
     - "#CarNumber#"
     - "#Email#"
+
+data:
+  use_cleaning: false        # true: clean_text() 적용 (Phase 3+, 단독 자음/모음·빈 괄호·반복 특수기호 제거)
+  use_length_filter: false   # true: filter_by_length() 적용 (dialogue≤1500, summary 50~250자)
 
 metrics:
   use_korouge: false   # true로 변경하면 korouge-score 사용 (Phase 3+, Java 불필요)
